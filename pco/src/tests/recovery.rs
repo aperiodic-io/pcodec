@@ -451,6 +451,38 @@ fn test_dict() -> PcoResult<()> {
   Ok(())
 }
 
+/// pco 1.0.4 wrote files it could not read with Dict mode and lookbacks
+/// together ("dict index exceeded dict length 1" for these three numbers).
+#[test]
+fn test_dict_with_lookback() -> PcoResult<()> {
+  let config = ChunkConfig::default()
+    .with_compression_level(5)
+    .with_mode_spec(ModeSpec::TryDict)
+    .with_delta_spec(DeltaSpec::TryLookback);
+  let nums = vec![524351.99_f64; 3];
+  let compressed = simple_compress(&nums, &config)?;
+  assert_nums_eq(
+    &simple_decompress(&compressed)?,
+    &nums,
+    "dict with lookback",
+  )?;
+  for level in 0..=12 {
+    let nums: Vec<i64> = (0..5_000)
+      .map(|i| [5, 77, -3, 1 << 40][i % 97 % 4])
+      .collect();
+    let compressed = simple_compress(
+      &nums,
+      &config.clone().with_compression_level(level),
+    )?;
+    assert_nums_eq(
+      &simple_decompress(&compressed)?,
+      &nums,
+      "dict with lookback",
+    )?;
+  }
+  Ok(())
+}
+
 #[test]
 fn test_conv1_nominal() -> PcoResult<()> {
   let mut x0 = 31;
