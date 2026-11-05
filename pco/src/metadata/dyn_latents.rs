@@ -28,21 +28,26 @@ impl DynLatents {
     )
   }
 
+  /// Replaces the latents with `n` latents read from `reader_builder`.
+  ///
+  /// `n` comes from the data, so the latents are allocated as they are read:
+  /// a count the data cannot back fails once the data runs out, having
+  /// allocated no more than the data it read.
   pub(crate) fn read_long_uncompressed_in_place<R: BetterBufRead>(
     &mut self,
     reader_builder: &mut BitReaderBuilder<R>,
+    n: usize,
   ) -> PcoResult<()> {
     const READ_BATCH_N: usize = 512;
     const READ_SIZE: usize = READ_BATCH_N * MAX_SUPPORTED_PRECISION_BYTES + OVERSHOOT_PADDING;
     match_latent_enum!(
       self,
       DynLatents<L>(inner) => {
-        let n = inner.len();
+        inner.clear();
         for start in (0..n).step_by(READ_BATCH_N) {
+          let batch_n = READ_BATCH_N.min(n - start);
           reader_builder.with_reader(READ_SIZE, |reader| unsafe {
-            for x in inner[start..(start + READ_BATCH_N).min(n)].iter_mut() {
-              *x = reader.read_uint::<L>(L::BITS);
-            }
+            inner.extend((0..batch_n).map(|_| reader.read_uint::<L>(L::BITS)));
             Ok(())
           })?;
         }

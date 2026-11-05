@@ -7,7 +7,6 @@ use crate::constants::{
   MAX_SUPPORTED_PRECISION_BYTES, OVERSHOOT_PADDING,
 };
 use crate::data_types::float::Float;
-use crate::data_types::latent_priv::LatentPriv;
 use crate::data_types::{Latent, LatentType};
 use crate::errors::{PcoError, PcoResult};
 use crate::macros::match_latent_enum;
@@ -104,6 +103,7 @@ impl Mode {
     version: &FormatVersion,
     latent_type: LatentType,
   ) -> PcoResult<Self> {
+    let mut dict_n = 0;
     let mut mode = reader_builder.with_reader(FIXED_READ_SIZE, |reader| unsafe {
       let read_latent = |reader| {
         match_latent_enum!(
@@ -135,15 +135,15 @@ impl Mode {
           FloatQuant(k)
         }
         4 => {
-          let n_unique = reader.read_usize(BITS_TO_ENCODE_DICT_LEN);
+          dict_n = reader.read_usize(BITS_TO_ENCODE_DICT_LEN);
           // we byte align so that future implementations might read the raw
           // values faster
           reader.drain_empty_byte("expected zeros between dict mode length and values")?;
-          // leave dictionary uninitialized for now because our reader might not
-          // be long enough
+          // leave dictionary empty for now because our reader might not be
+          // long enough
           let dict = match_latent_enum!(
             latent_type,
-            LatentType<L> => { DynLatents::new::<L>(vec![L::ZERO; n_unique]) }
+            LatentType<L> => { DynLatents::new::<L>(Vec::new()) }
           );
           Dict(dict)
         }
@@ -159,8 +159,8 @@ impl Mode {
     })?;
 
     if let Mode::Dict(dict) = &mut mode {
-      // initialize the dictionary for real
-      dict.read_long_uncompressed_in_place(reader_builder)?;
+      // read the dictionary for real
+      dict.read_long_uncompressed_in_place(reader_builder, dict_n)?;
     }
 
     Ok(mode)
