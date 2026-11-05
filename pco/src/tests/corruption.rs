@@ -9,7 +9,9 @@
 use crate::chunk_config::{ChunkConfig, DeltaSpec};
 use crate::data_types::Number;
 use crate::errors::PcoResult;
-use crate::standalone::{simple_compress, simple_decompress, FileCompressor, FileDecompressor};
+use crate::standalone::{
+  simple_compress, simple_decompress, DecompressorItem, FileCompressor, FileDecompressor,
+};
 use crate::ModeSpec;
 
 /// The mutations tried at each byte offset: every single-bit flip, plus the
@@ -125,4 +127,90 @@ fn test_float_quant_k_beyond_type_width_is_rejected() {
   for k in [32, 33, 64, 255, 256, u32::MAX] {
     check::<f32>(k, 32);
   }
+}
+
+/// Decodes the first chunk of `file` into `dst`, as a reader that knows how
+/// many numbers to expect does (so the output costs nothing, whatever count
+/// the chunk claims).
+fn decode_into(file: &[u8], dst: &mut [i64]) -> PcoResult<()> {
+  let (fd, src) = FileDecompressor::new(file)?;
+  if let DecompressorItem::Chunk(mut cd) = fd.chunk_decompressor::<i64, _>(src)? {
+    while !cd.read(dst)?.finished {}
+  }
+  Ok(())
+}
+
+/// The most bytes decoding any single-byte corruption (see `corrupt_values`)
+/// of the first 128 bytes of `file` into a buffer of `n` numbers allocates at
+/// once.
+fn worst_corruption_peak(file: &[u8], n: usize) -> usize {
+  let mut dst = vec![0_i64; n];
+  let mut worst = 0;
+  for i in 0..file.len().min(128) {
+    for value in corrupt_values(file[i]) {
+      let mut corrupt = file.to_vec();
+      corrupt[i] = value;
+      let peak = crate::poisoning_allocator::peak_bytes_allocated(|| {
+        let _ = decode_into(&corrupt, &mut dst);
+      });
+      worst = worst.max(peak);
+    }
+  }
+  worst
+}
+
+/// What decoding the intact file allocates, plus room for scratch space; a
+/// corrupt header must not cost more than this.
+fn allocation_budget(file: &[u8], n: usize) -> usize {
+  let mut dst = vec![0_i64; n];
+  let intact = crate::poisoning_allocator::peak_bytes_allocated(|| {
+    decode_into(file, &mut dst).unwrap();
+  });
+  4 * intact + (1 << 20)
+}
+
+/// A Dict mode dictionary length that the data cannot back (up to 2^25
+/// entries) must not be allocated before the entries are read.
+#[test]
+fn test_dict_len_not_backed_by_data_costs_no_memory() -> PcoResult<()> {
+  let nums: Vec<i64> = (0..5_000).map(|i| [5, 77, 1 << 40, -3][i % 4]).collect();
+  let file = simple_compress(
+    &nums,
+    &ChunkConfig::default().with_mode_spec(ModeSpec::TryDict),
+  )?;
+  let (worst, budget) = (
+    worst_corruption_peak(&file, nums.len()),
+    allocation_budget(&file, nums.len()),
+  );
+  assert!(
+    worst <= budget,
+    "a corrupt {}-byte Dict file allocated {} bytes (budget {})",
+    file.len(),
+    worst,
+    budget
+  );
+  Ok(())
+}
+
+/// A lookback window (up to 2^24 numbers) larger than the page can reach must
+/// not be allocated: lookbacks before the page's state only ever read zeros.
+#[test]
+fn test_lookback_window_beyond_the_page_costs_no_memory() -> PcoResult<()> {
+  let nums: Vec<i64> = (0..5_000).map(|i| (i % 97 * (i % 13)) as i64).collect();
+  let file = simple_compress(
+    &nums,
+    &ChunkConfig::default().with_delta_spec(DeltaSpec::TryLookback),
+  )?;
+  let (worst, budget) = (
+    worst_corruption_peak(&file, nums.len()),
+    allocation_budget(&file, nums.len()),
+  );
+  assert!(
+    worst <= budget,
+    "a corrupt {}-byte lookback file allocated {} bytes (budget {})",
+    file.len(),
+    worst,
+    budget
+  );
+  Ok(())
 }

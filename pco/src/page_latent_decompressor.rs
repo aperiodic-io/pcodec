@@ -71,13 +71,15 @@ pub struct PageLatentDecompressor<L: Latent> {
 }
 
 impl<L: Latent> PageLatentDecompressor<L> {
+  /// `page_n` is the count of numbers in the page.
   pub fn new(
     ans_final_state_idxs: [AnsState; ANS_INTERLEAVING],
     delta_encoding: &LatentVarDeltaEncoding,
     stored_delta_state: Vec<L>,
+    page_n: usize,
   ) -> Self {
     let (working_delta_state, delta_state_pos) =
-      delta::new_buffer_and_pos(delta_encoding, stored_delta_state);
+      delta::new_buffer_and_pos(delta_encoding, stored_delta_state, page_n);
 
     Self {
       ans_state_idxs: ans_final_state_idxs,
@@ -321,6 +323,7 @@ mod micro {
       [0; ANS_INTERLEAVING],
       &LatentVarDeltaEncoding::NoOp,
       Vec::new(),
+      0,
     )
   }
 

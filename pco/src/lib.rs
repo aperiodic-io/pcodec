@@ -60,22 +60,50 @@ mod tests;
 
 // To ensure our tests surface uninitialized memory issues, since some default
 // allocators fill with 0, we make the allocator write uncommon values instead.
+// It also keeps per-thread byte counts, so that tests can bound how much a
+// decoder allocates (see `peak_bytes_allocated`).
 #[cfg(test)]
 mod poisoning_allocator {
   use std::alloc::{GlobalAlloc, Layout, System};
+  use std::cell::Cell;
 
   struct Poisoning;
+
+  thread_local! {
+    static CURRENT: Cell<usize> = const { Cell::new(0) };
+    static PEAK: Cell<usize> = const { Cell::new(0) };
+  }
+
+  fn track(f: impl FnOnce(usize) -> usize) {
+    // try_with: the counters may already be gone while a thread exits
+    let _ = CURRENT.try_with(|current| {
+      let now = f(current.get());
+      current.set(now);
+      let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+    });
+  }
+
+  /// The most bytes this thread held allocated at once while running `f`,
+  /// beyond what it held before.
+  pub(crate) fn peak_bytes_allocated(f: impl FnOnce()) -> usize {
+    let before = CURRENT.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    f();
+    PEAK.with(Cell::get) - before
+  }
 
   unsafe impl GlobalAlloc for Poisoning {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
       let ptr = System.alloc(layout);
       if !ptr.is_null() {
         ptr.write_bytes(0xab, layout.size());
+        track(|current| current + layout.size());
       }
       ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+      track(|current| current.saturating_sub(layout.size()));
       System.dealloc(ptr, layout)
     }
   }
