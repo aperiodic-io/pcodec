@@ -33,6 +33,8 @@ pub mod standalone;
 pub mod wrapped;
 
 mod ans;
+#[cfg(target_arch = "x86_64")]
+mod avx2_offsets;
 mod bin_optimization;
 mod bit_reader;
 mod bit_writer;

@@ -24,7 +24,67 @@ unsafe fn read_offsets<L: Latent, const READ_BYTES: usize>(
   debug_assert!(n >= 1, "read_offsets requires n >= 1");
   let base_bit_idx = reader.bit_idx();
   let src = reader.src;
-  for i in 0..n {
+
+  // Only offsets of up to 25 bits (READ_BYTES == 4) benefit from AVX2 gathers.
+  // Checking that first is resolved at compile time, so other specializations
+  // compile to exactly the scalar loop.
+  #[cfg(target_arch = "x86_64")]
+  if READ_BYTES == 4 && is_x86_feature_detected!("avx2") {
+    let start = crate::avx2_offsets::read_offsets::<L, READ_BYTES>(
+      src,
+      base_bit_idx,
+      offset_bits_csum,
+      offset_bits,
+      latents,
+      n,
+    );
+    read_offsets_scalar::<L, READ_BYTES>(
+      src,
+      base_bit_idx,
+      offset_bits_csum,
+      offset_bits,
+      latents,
+      start,
+      n,
+    );
+  } else {
+    read_offsets_scalar::<L, READ_BYTES>(
+      src,
+      base_bit_idx,
+      offset_bits_csum,
+      offset_bits,
+      latents,
+      0,
+      n,
+    );
+  }
+  #[cfg(not(target_arch = "x86_64"))]
+  read_offsets_scalar::<L, READ_BYTES>(
+    src,
+    base_bit_idx,
+    offset_bits_csum,
+    offset_bits,
+    latents,
+    0,
+    n,
+  );
+
+  let final_bit_idx = base_bit_idx + offset_bits_csum[n - 1] as usize + offset_bits[n - 1] as usize;
+  reader.stale_byte_idx = final_bit_idx / 8;
+  reader.bits_past_byte = final_bit_idx as Bitlen % 8;
+}
+
+#[inline]
+unsafe fn read_offsets_scalar<L: Latent, const READ_BYTES: usize>(
+  src: &[u8],
+  base_bit_idx: usize,
+  offset_bits_csum: &[u32],
+  offset_bits: &[u32],
+  latents: &mut [L],
+  start: usize,
+  n: usize,
+) {
+  for i in start..n {
     let offset_bits = offset_bits[i];
     let offset_bits_csum = offset_bits_csum[i];
     let bit_idx = base_bit_idx as Bitlen + offset_bits_csum;
@@ -39,10 +99,6 @@ unsafe fn read_offsets<L: Latent, const READ_BYTES: usize>(
 
     latents[i] = latents[i].wrapping_add(offset);
   }
-
-  let final_bit_idx = base_bit_idx + offset_bits_csum[n - 1] as usize + offset_bits[n - 1] as usize;
-  reader.stale_byte_idx = final_bit_idx / 8;
-  reader.bits_past_byte = final_bit_idx as Bitlen % 8;
 }
 
 // Here we do something very strange to ensure vectorization of
