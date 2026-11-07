@@ -1,4 +1,6 @@
 mod consecutive;
+#[cfg(target_arch = "x86_64")]
+mod consecutive_x86;
 mod conv1;
 mod lookback;
 
