@@ -33,6 +33,11 @@ pub fn encode_in_place<L: Latent>(order: usize, mut latents: &mut [L]) -> Vec<L>
 }
 
 fn first_order_decode_consecutive_in_place<L: Latent>(moment: &mut L, latents: &mut [L]) {
+  #[cfg(target_arch = "x86_64")]
+  let latents = {
+    let k = super::consecutive_x86::decode_prefix(moment, latents);
+    &mut latents[k..]
+  };
   for delta in latents.iter_mut() {
     let tmp = *delta;
     *delta = *moment;
