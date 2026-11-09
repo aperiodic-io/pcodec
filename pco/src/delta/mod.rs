@@ -69,17 +69,21 @@ pub fn new_conv1(order: usize, latents: &DynLatents) -> PcoResult<Option<DeltaEn
   Ok(delta_encoding)
 }
 
+/// `page_n` is the count of numbers in the page, which bounds the lookback
+/// window it needs.
 pub fn new_buffer_and_pos<L: Latent>(
   delta_encoding: &LatentVarDeltaEncoding,
   stored_state: Vec<L>,
+  page_n: usize,
 ) -> (Vec<L>, usize) {
   match delta_encoding {
     LatentVarDeltaEncoding::NoOp
     | LatentVarDeltaEncoding::Consecutive(_)
     | LatentVarDeltaEncoding::Conv1(_) => (stored_state, 0),
-    LatentVarDeltaEncoding::Lookback(config) => {
-      lookback::new_window_buffer_and_pos(*config, &stored_state)
-    }
+    LatentVarDeltaEncoding::Lookback(config) => lookback::new_window_buffer_and_pos(
+      lookback::page_window_n(*config, page_n),
+      &stored_state,
+    ),
   }
 }
 
