@@ -127,3 +127,61 @@ fn test_low_level_wrapped() -> PcoResult<()> {
     },
   ])
 }
+
+/// The lookback window is sized for the whole chunk, but each page only ever
+/// looks back within itself, so a page decoder must allocate for the page,
+/// not the chunk. Before, every 300-number page of this chunk allocated a
+/// 2^15-number window (256KiB of u32s).
+#[test]
+fn test_small_pages_of_a_lookback_chunk_allocate_for_the_page() -> PcoResult<()> {
+  let nums: Vec<u32> = (0..40_000_u32).map(|i| (i % 97) * (i % 13)).collect();
+  let page_n = 300;
+  let chunk = Chunk {
+    nums,
+    config: ChunkConfig {
+      delta_spec: DeltaSpec::TryLookback,
+      paging_spec: PagingSpec::EqualPagesUpTo(page_n),
+      ..Default::default()
+    },
+  };
+  let compressed = test_wrapped_compress(std::slice::from_ref(&chunk), Vec::new())?;
+
+  let (fd, src) = FileDecompressor::new(compressed.as_slice())?;
+  let (mut cd, mut src) = fd.chunk_decompressor::<u32, _>(src)?;
+  let crate::metadata::DeltaEncoding::Lookback { config, .. } = cd.meta().delta_encoding else {
+    panic!(
+      "expected lookback, got {:?}",
+      cd.meta().delta_encoding
+    );
+  };
+  assert!(config.window_n() >= 1 << 15);
+
+  let n_per_page = chunk.config.paging_spec.n_per_page(chunk.nums.len())?;
+  assert!(n_per_page.len() > 100);
+  let mut page_start = 0;
+  for &page_n in &n_per_page {
+    let mut res = None;
+    let peak = crate::poisoning_allocator::peak_bytes_allocated(|| {
+      res = Some((|| {
+        let mut pd = cd.page_decompressor(src, page_n)?;
+        let page_nums = decompress_by_batch(&mut pd, page_n)?;
+        PcoResult::Ok((page_nums, pd.into_src()))
+      })());
+    });
+    let (page_nums, new_src) = res.unwrap()?;
+    src = new_src;
+    assert_eq!(
+      &page_nums,
+      &chunk.nums[page_start..page_start + page_n]
+    );
+    page_start += page_n;
+    assert!(
+      peak < 1 << 16,
+      "a {}-number page allocated {} bytes",
+      page_n,
+      peak
+    );
+  }
+  assert_eq!(page_start, chunk.nums.len());
+  Ok(())
+}

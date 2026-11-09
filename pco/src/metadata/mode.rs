@@ -260,4 +260,77 @@ mod tests {
     check_bit_size(Mode::FloatMult(DynLatent::new(77_u32)));
     check_bit_size(Mode::FloatQuant(7));
   }
+
+  /// Serializes a Dict mode that claims `claimed_n` entries but holds `dict`.
+  fn dict_mode_bytes(claimed_n: usize, dict: &[u64]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut writer = BitWriter::new(&mut bytes, 64 + 8 * dict.len());
+    unsafe {
+      writer.write_bitlen(4, BITS_TO_ENCODE_MODE_VARIANT);
+      writer.write_usize(claimed_n, BITS_TO_ENCODE_DICT_LEN);
+      writer.finish_byte();
+      for &x in dict {
+        writer.write_uint(x, 64);
+      }
+    }
+    writer.flush().unwrap();
+    drop(writer);
+    bytes
+  }
+
+  fn read_mode(bytes: &[u8]) -> PcoResult<Mode> {
+    let mut reader_builder = BitReaderBuilder::new(bytes);
+    Mode::read_from(
+      &mut reader_builder,
+      &FormatVersion::default(),
+      LatentType::U64,
+    )
+  }
+
+  #[test]
+  fn test_dict_round_trips_across_read_batches() -> PcoResult<()> {
+    // 0, 1, exactly one read batch (512), and several batches plus a partial
+    for n in [0, 1, 511, 512, 513, 1500] {
+      let dict: Vec<u64> = (0..n as u64)
+        .map(|i| i.wrapping_mul(0x9e3779b97f4a7c15))
+        .collect();
+      let mode = read_mode(&dict_mode_bytes(n, &dict))?;
+      assert_eq!(
+        mode,
+        Mode::Dict(DynLatents::new(dict)),
+        "n={}",
+        n
+      );
+    }
+    Ok(())
+  }
+
+  /// A Dict length the data cannot back fails as insufficient data, without
+  /// first allocating the claimed length (up to 2^25 entries, 256MiB of u64s).
+  #[test]
+  fn test_dict_len_beyond_data_is_insufficient_data_and_cheap() {
+    let dict = vec![7_u64; 3];
+    for claimed_n in [4, 513, (1 << BITS_TO_ENCODE_DICT_LEN) - 1] {
+      let bytes = dict_mode_bytes(claimed_n, &dict);
+      let mut res = None;
+      let peak = crate::poisoning_allocator::peak_bytes_allocated(|| {
+        res = Some(read_mode(&bytes));
+      });
+      let err = res.unwrap().unwrap_err();
+      assert_eq!(
+        err.kind,
+        crate::errors::ErrorKind::InsufficientData,
+        "claimed_n={}: {}",
+        claimed_n,
+        err
+      );
+      // a couple read batches of 512 u64s, plus reader overhead
+      assert!(
+        peak < 1 << 16,
+        "claimed_n={} allocated {} bytes",
+        claimed_n,
+        peak
+      );
+    }
+  }
 }

@@ -236,6 +236,10 @@ pub fn decode_in_place<L: Latent>(
   // more; the page's window is never less than a full batch unless the
   // configured one is
   let window_n = config_window_n.min(window_buffer.len() / 2);
+  debug_assert_eq!(
+    window_buffer.len(),
+    2 * cmp::max(window_n, FULL_BATCH_N)
+  );
   let mut start_pos = *window_buffer_pos;
   // Lookbacks can be shorter than latents in the final batch,
   // but we always decompress latents.len() numbers
@@ -399,47 +403,71 @@ mod tests {
   }
 
   /// A page decodes the same with its own window as with the configured one,
-  /// whatever its lookbacks, including ones reaching before its state.
+  /// whatever its lookbacks: in range, zero, reaching before its state, just
+  /// past its own window, or past the configured window (corrupt). This
+  /// includes pages longer than the configured window, whose buffer cycles.
   #[test]
   fn test_page_window_decodes_like_the_configured_window() {
     let config = DeltaLookbackConfig {
       window_n_log: 12,
       state_n_log: 2,
     };
+    let config_window_n = config.window_n() as DeltaLookback;
     let state = [11_u32, 22, 33, 44];
-    for page_n in [4, 5, 17, 300, 700, 3000] {
+    for page_n in [
+      4, 5, 17, 255, 256, 257, 300, 700, 3000, 4092, 4093, 5000, 9000,
+    ] {
+      let page_window = page_window_n(config, page_n);
+      assert!(page_window <= config.window_n());
+      assert!(page_window >= page_n + state.len() || page_window == config.window_n());
       let n_lookbacks = page_n - state.len();
-      for max_lookback in [4, page_n as DeltaLookback, 4096, 4097] {
-        let mut lookbacks: Vec<DeltaLookback> = (0..n_lookbacks)
-          .map(|i| 1 + (i as DeltaLookback * 7919) % max_lookback)
-          .collect();
-        if let Some(last) = lookbacks.last_mut() {
-          *last = max_lookback;
-        }
-        let latents: Vec<u32> = (0..page_n as u32).map(|i| i * 31 + 5).collect();
-        let page = decode_page(
-          config,
-          page_window_n(config, page_n),
-          &state,
-          &lookbacks,
-          &latents,
-        );
-        let configured = decode_page(
-          config,
-          config.window_n(),
-          &state,
-          &lookbacks,
-          &latents,
-        );
-        assert_eq!(
-          page.1,
-          n_lookbacks > 0 && max_lookback > 4096
-        );
-        if !page.1 {
+      for max_lookback in [
+        1,
+        4,
+        page_n as DeltaLookback,
+        page_window as DeltaLookback,
+        page_window as DeltaLookback + 1,
+        config_window_n,
+        config_window_n + 1,
+        DeltaLookback::MAX,
+      ] {
+        for with_zeros in [false, true] {
+          let mut lookbacks: Vec<DeltaLookback> = (0..n_lookbacks)
+            .map(|i| 1 + (i as DeltaLookback).wrapping_mul(7919) % max_lookback)
+            .collect();
+          if let Some(last) = lookbacks.last_mut() {
+            *last = max_lookback;
+          }
+          if with_zeros {
+            for l in lookbacks.iter_mut().step_by(13) {
+              *l = 0;
+            }
+          }
+          let latents: Vec<u32> = (0..page_n as u32).map(|i| i * 31 + 5).collect();
+          let page = decode_page(
+            config,
+            page_window,
+            &state,
+            &lookbacks,
+            &latents,
+          );
+          let configured = decode_page(
+            config,
+            config.window_n(),
+            &state,
+            &lookbacks,
+            &latents,
+          );
+          let ctx = format!(
+            "page_n={} max_lookback={} with_zeros={}",
+            page_n, max_lookback, with_zeros
+          );
+          assert_eq!(page, configured, "{}", ctx);
           assert_eq!(
-            page, configured,
-            "page_n={} max_lookback={}",
-            page_n, max_lookback
+            page.1,
+            lookbacks.iter().any(|&l| l > config_window_n),
+            "{}",
+            ctx
           );
         }
       }
